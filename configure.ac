@@ -860,12 +860,17 @@ if test "x$build_tests" != "xno" ; then
     AX_PTHREAD([ CARES_TEST_PTHREADS="yes" ], [ AC_MSG_ERROR([threading required for tests]) ])
   fi
 
+  dnl The DNSSEC tests use OpenSSL for the cryptography when it is available,
+  dnl c-ares itself has none
+  PKG_CHECK_MODULES([LIBCRYPTO], [libcrypto], [ have_libcrypto=yes ], [ have_libcrypto=no ])
+
   BUILD_SUBDIRS="${BUILD_SUBDIRS} test"
 fi
 AC_MSG_CHECKING([whether to build tests])
 AC_MSG_RESULT([$build_tests])
 
 AM_CONDITIONAL(BUILD_TESTS, test "x$build_tests" = "xyes")
+AM_CONDITIONAL(CARES_TEST_OPENSSL, test "x$have_libcrypto" = "xyes")
 
 AC_SUBST(AM_CFLAGS)
 AC_SUBST(AM_CPPFLAGS)

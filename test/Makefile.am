@@ -21,12 +21,17 @@ include Makefile.inc
 TESTS = arestest fuzzcheck.sh
 
 noinst_PROGRAMS = arestest aresfuzz aresfuzzname dnsdump ares_queryloop
-EXTRA_DIST = fuzzcheck.sh CMakeLists.txt Makefile.m32 Makefile.msvc README.md $(srcdir)/fuzzinput/* $(srcdir)/fuzznames/*
+EXTRA_DIST = fuzzcheck.sh ares-test-dnssec-vectors.py CMakeLists.txt Makefile.m32 Makefile.msvc README.md $(srcdir)/fuzzinput/* $(srcdir)/fuzznames/*
 arestest_SOURCES = $(TESTSOURCES) $(TESTHEADERS)
 
 # Not interested in coverage of test code, but linking the test binary needs the coverage option
 arestest_CXXFLAGS = $(AM_CXXFLAGS) $(GMOCK_CFLAGS)
 arestest_LDADD = $(GMOCK_LIBS) $(top_builddir)/src/lib/libcares.la $(PTHREAD_LIBS) $(CODE_COVERAGE_LIBS)
+if CARES_TEST_OPENSSL
+# The DNSSEC tests use OpenSSL for the cryptography
+arestest_CXXFLAGS += $(LIBCRYPTO_CFLAGS) -DCARES_TEST_OPENSSL
+arestest_LDADD += $(LIBCRYPTO_LIBS)
+endif
 
 aresfuzz_SOURCES = $(FUZZSOURCES)
 aresfuzz_LDADD = $(top_builddir)/src/lib/libcares.la $(PTHREAD_LIBS) $(CODE_COVERAGE_LIBS)

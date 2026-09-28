@@ -43,6 +43,9 @@ CSOURCES = ares_addrinfo2hostent.c	\
   inet_net_pton.c			\
   inet_ntop.c				\
   windows_port.c			\
+  dnssec/ares_dnssec.c			\
+  dnssec/ares_dnssec_crypto.c		\
+  dnssec/ares_dnssec_wire.c		\
   dsa/ares_array.c			\
   dsa/ares_htable.c			\
   dsa/ares_htable_asvp.c		\
@@ -104,6 +107,8 @@ HHEADERS = ares_android.h			\
   ares_private.h			\
   ares_setup.h				\
   ares_socket.h				\
+  dnssec/ares_dnssec.h			\
+  dnssec/ares_dnssec_int.h		\
   dsa/ares_htable.h			\
   dsa/ares_slist.h			\
   event/ares_event.h			\

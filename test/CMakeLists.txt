@@ -58,6 +58,14 @@ ENDIF()
 target_compile_features(arestest PRIVATE cxx_std_14)
 target_compile_definitions(arestest PRIVATE CARES_NO_DEPRECATED)
 
+# The DNSSEC tests use OpenSSL for the cryptography when it is available,
+# c-ares itself has none
+find_package(OpenSSL COMPONENTS Crypto QUIET)
+IF (TARGET OpenSSL::Crypto)
+  target_compile_definitions(arestest PRIVATE CARES_TEST_OPENSSL)
+  target_link_libraries(arestest PRIVATE OpenSSL::Crypto)
+ENDIF ()
+
 IF (CARES_BUILD_CONTAINER_TESTS)
   target_compile_definitions(arestest PRIVATE HAVE_USER_NAMESPACE HAVE_UTS_NAMESPACE)
 ENDIF ()
