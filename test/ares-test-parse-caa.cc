@@ -79,6 +79,38 @@ TEST_F(LibraryTest, ParseCaaReplySingleOK) {
   ares_free_data(caa);
 }
 
+// RFC 8659 4.2: the value of an issue property may be empty, which forbids
+// every CA to issue certificates for the domain.
+TEST_F(LibraryTest, ParseCaaReplyEmptyValue) {
+  std::vector<byte> data = {
+    0x27, 0x86, 0x81, 0x80, 0x00, 0x01, 0x00, 0x01,  0x00, 0x00, 0x00, 0x00, 0x06, 0x67, 0x6F, 0x6F,  //  '............goo
+    0x67, 0x6C, 0x65, 0x03, 0x63, 0x6F, 0x6D, 0x00,  0x01, 0x01, 0x00, 0x01, 0xC0, 0x0C, 0x01, 0x01,  //  gle.com.........
+    0x00, 0x01, 0x00, 0x01, 0x43, 0xBE, 0x00, 0x07,  0x00, 0x05, 0x69, 0x73, 0x73, 0x75, 0x65         //  ....C.....issue
+  };
+
+  struct ares_caa_reply* caa = nullptr;
+  EXPECT_EQ(ARES_SUCCESS, ares_parse_caa_reply(data.data(), (int)data.size(), &caa));
+  ASSERT_NE(nullptr, caa);
+  EXPECT_EQ(nullptr, caa->next);
+  EXPECT_EQ(caa->critical, (int)0);
+  EXPECT_STREQ((char *)caa->property, "issue");
+  EXPECT_EQ(caa->length, (size_t)0);
+  EXPECT_STREQ((char *)caa->value, "");
+  ares_free_data(caa);
+
+  // Write it back
+  ares_dns_record_t *dnsrec = NULL;
+  ASSERT_EQ(ARES_SUCCESS, ares_dns_parse(data.data(), data.size(), 0, &dnsrec));
+  unsigned char *out     = NULL;
+  size_t         out_len = 0;
+  EXPECT_EQ(ARES_SUCCESS, ares_dns_write(dnsrec, &out, &out_len));
+  if (out != NULL) {
+    EXPECT_EQ(data, std::vector<byte>(out, out + out_len));
+  }
+  ares_free_string(out);
+  ares_dns_record_destroy(dnsrec);
+}
+
 TEST_F(LibraryTest, ParseCaaBogusReply1) {
   std::vector<byte> data = {
     0x27, 0x86, 0x81, 0x80, 0x00, 0x01, 0x00, 0x01,  0x00, 0x00, 0x00, 0x00, 0x06, 0x67, 0x6F, 0x6F,  //  '............goo 

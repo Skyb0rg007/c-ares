@@ -1110,11 +1110,10 @@ static ares_status_t ares_dns_parse_rr_caa(ares_buf_t *buf, ares_dns_rr_t *rr,
     return status;
   }
 
-  /* Value - binary! (remaining buffer */
+  /* Value - binary! (remaining buffer), it may be empty (RFC 8659 4.2) */
   data_len = ares_dns_rr_remaining_len(buf, orig_len, rdlength);
   if (data_len == 0) {
-    status = ARES_EBADRESP;
-    return status;
+    return ares_dns_rr_set_bin(rr, ARES_RR_CAA_VALUE, NULL, 0);
   }
   status = ares_buf_fetch_bytes_dup(buf, data_len, ARES_TRUE, &data);
   if (status != ARES_SUCCESS) {

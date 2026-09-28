@@ -1171,9 +1171,9 @@ static ares_status_t ares_dns_write_rr_caa(ares_buf_t          *buf,
     return status; /* LCOV_EXCL_LINE: OutOfMemory */
   }
 
-  /* Value - binary! (remaining buffer */
+  /* Value - binary! (remaining buffer), it may be empty */
   data = ares_dns_rr_get_bin(rr, ARES_RR_CAA_VALUE, &data_len);
-  if (data == NULL || data_len == 0) {
+  if (data == NULL) {
     return ARES_EFORMERR;
   }
 
