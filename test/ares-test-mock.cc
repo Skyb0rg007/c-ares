@@ -702,7 +702,7 @@ TEST_P(MockTCPChannelTest, MalformedResponse) {
   ares_gethostbyname(channel_, "www.google.com.", AF_INET, HostCallback, &result);
   Process();
   EXPECT_TRUE(result.done_);
-  EXPECT_EQ(ARES_EBADRESP, result.status_);
+  EXPECT_EQ((int)ARES_EBADRESP, result.status_);
 }
 
 TEST_P(MockTCPChannelTest, FormErrResponse) {
@@ -1018,6 +1018,53 @@ CONTAINED_TEST_P(ContainedMockChannelSysConfig, SysConfigNdots0,
 #endif
 
 // Issue #858
+// Query types c-ares has no name for (here CDS and CDNSKEY) must not share
+// cache entries
+TEST_P(CacheQueriesTest, UnnamedTypes) {
+  DNSPacket rsp59;
+  rsp59.set_response().set_aa()
+    .add_question(new DNSQuestion("example.com", 59))
+    .add_auth(new DNSSoaRR("example.com", 600, "ns1.example.com", "admin.example.com", 1, 3600, 3600, 3600, 3600));
+  DNSPacket rsp60;
+  rsp60.set_response().set_aa()
+    .add_question(new DNSQuestion("example.com", 60))
+    .add_auth(new DNSSoaRR("example.com", 600, "ns1.example.com", "admin.example.com", 1, 3600, 3600, 3600, 3600));
+  EXPECT_CALL(server_, OnRequest("example.com", 59))
+    .WillOnce(SetReply(&server_, &rsp59));
+  EXPECT_CALL(server_, OnRequest("example.com", 60))
+    .WillOnce(SetReply(&server_, &rsp60));
+
+  QueryResult result59;
+  ares_query_dnsrec(channel_, "example.com", ARES_CLASS_IN,
+                    (ares_dns_rec_type_t)59, QueryCallback, &result59, NULL);
+  Process();
+  EXPECT_TRUE(result59.done_);
+
+  QueryResult result60;
+  ares_query_dnsrec(channel_, "example.com", ARES_CLASS_IN,
+                    (ares_dns_rec_type_t)60, QueryCallback, &result60, NULL);
+  Process();
+  EXPECT_TRUE(result60.done_);
+  const char         *name;
+  ares_dns_rec_type_t qtype;
+  ares_dns_class_t    qclass;
+  ASSERT_NE(nullptr, result60.dnsrec_.dnsrec_);
+  EXPECT_EQ(ARES_SUCCESS, ares_dns_record_query_get(result60.dnsrec_.dnsrec_,
+                                                    0, &name, &qtype, &qclass));
+  EXPECT_EQ(60, (int)qtype);
+
+  // cached now
+  QueryResult cached59;
+  ares_query_dnsrec(channel_, "example.com", ARES_CLASS_IN,
+                    (ares_dns_rec_type_t)59, QueryCallback, &cached59, NULL);
+  Process();
+  EXPECT_TRUE(cached59.done_);
+  ASSERT_NE(nullptr, cached59.dnsrec_.dnsrec_);
+  EXPECT_EQ(ARES_SUCCESS, ares_dns_record_query_get(cached59.dnsrec_.dnsrec_,
+                                                    0, &name, &qtype, &qclass));
+  EXPECT_EQ(59, (int)qtype);
+}
+
 TEST_P(CacheQueriesTest, BlankName) {
   DNSPacket rsp;
   rsp.set_response().set_aa()

@@ -93,7 +93,10 @@ static char *ares_qcache_calc_key(const ares_dns_record_t *dnsrec)
       goto fail; /* LCOV_EXCL_LINE: OutOfMemory */
     }
 
-    status = ares_buf_append_str(buf, ares_dns_rec_type_tostr(qtype));
+    /* Use the number, not the name: all types without a name here would
+     * otherwise share the same key, and the response for one would be
+     * returned for another. */
+    status = ares_buf_append_num_dec(buf, (size_t)qtype, 0);
     if (status != ARES_SUCCESS) {
       goto fail; /* LCOV_EXCL_LINE: OutOfMemory */
     }
@@ -103,7 +106,7 @@ static char *ares_qcache_calc_key(const ares_dns_record_t *dnsrec)
       goto fail; /* LCOV_EXCL_LINE: OutOfMemory */
     }
 
-    status = ares_buf_append_str(buf, ares_dns_class_tostr(qclass));
+    status = ares_buf_append_num_dec(buf, (size_t)qclass, 0);
     if (status != ARES_SUCCESS) {
       goto fail; /* LCOV_EXCL_LINE: OutOfMemory */
     }
