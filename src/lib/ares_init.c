@@ -513,6 +513,9 @@ int ares_dup(ares_channel_t **dest, const ares_channel_t *src)
   (*dest)->notify_pending_write_cb_data = src->notify_pending_write_cb_data;
   (*dest)->query_enqueue_cb             = src->query_enqueue_cb;
   (*dest)->query_enqueue_cb_data        = src->query_enqueue_cb_data;
+  memcpy(&(*dest)->dnssec_crypto_funcs, &src->dnssec_crypto_funcs,
+         sizeof((*dest)->dnssec_crypto_funcs));
+  (*dest)->dnssec_crypto_data = src->dnssec_crypto_data;
 
   ares_strcpy((*dest)->local_dev_name, src->local_dev_name,
               sizeof((*dest)->local_dev_name));

@@ -128,6 +128,7 @@ void ares_destroy(ares_channel_t *channel)
   ares_hosts_file_destroy(channel->hf);
 
   ares_qcache_destroy(channel->qcache);
+  ares_free(channel->dnssec_anchors);
 
   ares_channel_threading_destroy(channel);
 

@@ -333,4 +333,20 @@ ares_status_t ares_dnssec_req_response(const ares_dnssec_req_t *req,
  */
 const char *ares_dnssec_status_str(ares_dnssec_status_t status);
 
+/*! For the test suite: make ares_query_dnssec() on a channel use other
+ *  trust anchors, time and flags.
+ *
+ *  \param[in] channel  Channel
+ *  \param[in] anchors  Trust anchors, one per line in the format of
+ *                      ares_dnssec_ctx_add_anchor(), or NULL for the root
+ *                      zone ones
+ *  \param[in] now      Time to validate signatures against, or 0 for the
+ *                      current time
+ *  \param[in] flags    ARES_DNSSEC_* flags
+ *  \return ARES_SUCCESS, ARES_EFORMERR or ARES_ENOMEM
+ */
+ares_status_t ares_dnssec_set_test_params(ares_channel_t *channel,
+                                          const char *anchors, time_t now,
+                                          unsigned int flags);
+
 #endif /* ARES_DNSSEC_H */

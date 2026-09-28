@@ -1140,6 +1140,538 @@ TEST_F(LibraryTest, DNSSECRequests)
   ares_dnssec_ctx_destroy(ctx);
 }
 
+/*
+ * ares_query_dnssec() with a mock server answering with the recorded
+ * responses
+ */
+
+// The test crypto functions for ares_set_dnssec_crypto_functions(), NULL
+// when there are none
+static const struct ares_dnssec_crypto_functions *TestCryptoFuncs()
+{
+#  ifdef CARES_TEST_OPENSSL
+  static const struct ares_dnssec_crypto_functions funcs = {
+    1, TestAlgSupported, TestVerify, TestDigestSupported, TestDigest
+  };
+  return &funcs;
+#  else
+  return nullptr;
+#  endif
+}
+
+class DNSSECMockBase
+  : public MockChannelOptsTest,
+    public ::testing::WithParamInterface<std::pair<int, bool>> {
+public:
+  explicit DNSSECMockBase(bool cache)
+    : MockChannelOptsTest(1, GetParam().first, GetParam().second, false,
+                          FillOptions(&opts_, cache),
+                          ARES_OPT_FLAGS | (cache ? ARES_OPT_QUERY_CACHE : 0))
+  {
+    if (TestCryptoFuncs() != nullptr) {
+      EXPECT_EQ(ARES_SUCCESS, ares_set_dnssec_crypto_functions(
+                                channel_, TestCryptoFuncs(), nullptr));
+    }
+  }
+
+  static struct ares_options *FillOptions(struct ares_options *opts, bool cache)
+  {
+    // The recorded responses have lowercase question names, so no DNS 0x20
+    memset(opts, 0, sizeof(*opts));
+    opts->flags          = ARES_FLAG_EDNS;
+    opts->qcache_max_ttl = cache ? 3600 : 0;
+    return opts;
+  }
+
+  // Answer queries from the tables of a test case, with SERVFAIL for queries
+  // without a response
+  void ServeCase(const struct dv_case &c)
+  {
+    ON_CALL(server_, OnRequest(_, _))
+      .WillByDefault([this, &c](const std::string &name, int type) {
+        std::string fqdn = name;
+        if (fqdn.empty() || fqdn[fqdn.size() - 1] != '.') {
+          fqdn += '.';
+        }
+        const struct dv_msg *m =
+          FindCaseMsg(c, fqdn.c_str(), (unsigned short)type);
+        if (m != nullptr) {
+          server_.SetReplyData(Pieces(m->msg));
+        } else {
+          servfail_.reset(new DNSPacket());
+          servfail_->set_response().set_rcode(SERVFAIL).add_question(
+            new DNSQuestion(name, type));
+          server_.SetReply(servfail_.get());
+        }
+      });
+  }
+
+  void SetCaseParams(const struct dv_case &c)
+  {
+    std::string anchors;
+    if (c.anchors != nullptr) {
+      for (const char * const *a = c.anchors; *a; a++) {
+        anchors += *a;
+        anchors += "\n";
+      }
+    }
+    EXPECT_EQ(ARES_SUCCESS,
+              ares_dnssec_set_test_params(
+                channel_, c.anchors != nullptr ? anchors.c_str() : NULL,
+                (time_t)c.now, c.flags));
+  }
+
+private:
+  struct ares_options        opts_;
+  std::unique_ptr<DNSPacket> servfail_;
+};
+
+class DNSSECMockTest : public DNSSECMockBase {
+public:
+  DNSSECMockTest() : DNSSECMockBase(false)
+  {
+  }
+};
+
+// With the query cache on
+class DNSSECCacheMockTest : public DNSSECMockBase {
+public:
+  DNSSECCacheMockTest() : DNSSECMockBase(true)
+  {
+  }
+};
+
+struct DNSSECQueryResult {
+  DNSSECQueryResult() : done(false), status(ARES_SUCCESS), timeouts(0)
+  {
+  }
+
+  ~DNSSECQueryResult()
+  {
+    ares_dns_record_destroy(dnsrec);
+  }
+
+  bool               done;
+  ares_status_t      status;
+  size_t             timeouts;
+  ares_dns_record_t *dnsrec = nullptr;
+};
+
+static void DNSSECQueryCallback(void *arg, ares_status_t status,
+                                size_t                   timeouts,
+                                const ares_dns_record_t *dnsrec)
+{
+  DNSSECQueryResult *result = (DNSSECQueryResult *)arg;
+  EXPECT_FALSE(result->done);
+  result->done     = true;
+  result->status   = status;
+  result->timeouts = timeouts;
+  if (dnsrec != nullptr) {
+    result->dnsrec = ares_dns_record_duplicate(dnsrec);
+  }
+}
+
+// The validation result the record tells
+static ares_dnssec_status_t RecordStatus(const ares_dns_record_t *dnsrec)
+{
+  if (ares_dns_record_get_rcode(dnsrec) != ARES_RCODE_SERVFAIL) {
+    return (ares_dns_record_get_flags(dnsrec) & ARES_FLAG_AD)
+             ? ARES_DNSSEC_SECURE
+             : ARES_DNSSEC_INSECURE;
+  }
+  for (size_t i = 0;
+       i < ares_dns_record_rr_cnt(dnsrec, ARES_SECTION_ADDITIONAL); i++) {
+    const ares_dns_rr_t *rr =
+      ares_dns_record_rr_get_const(dnsrec, ARES_SECTION_ADDITIONAL, i);
+    const unsigned char *val = NULL;
+    size_t               len = 0;
+    if (ares_dns_rr_get_type(rr) == ARES_REC_TYPE_OPT &&
+        ares_dns_rr_get_opt_byid(rr, ARES_RR_OPT_OPTIONS,
+                                 ARES_OPT_PARAM_EXTENDED_DNS_ERROR, &val,
+                                 &len) &&
+        len >= 2) {
+      return (val[0] == 0 && val[1] == 6) ? ARES_DNSSEC_BOGUS
+                                          : ARES_DNSSEC_INDETERMINATE;
+    }
+  }
+  return ARES_DNSSEC_INDETERMINATE;
+}
+
+static size_t RecordCount(const ares_dns_record_t *dnsrec, int qtype)
+{
+  size_t n = 0;
+  for (size_t i = 0; i < ares_dns_record_rr_cnt(dnsrec, ARES_SECTION_ANSWER);
+       i++) {
+    const ares_dns_rr_t *rr =
+      ares_dns_record_rr_get_const(dnsrec, ARES_SECTION_ANSWER, i);
+    if ((int)ares_dns_rr_get_type(rr) == qtype) {
+      n++;
+    }
+  }
+  return n;
+}
+
+TEST_P(DNSSECMockTest, Vectors)
+{
+  REQUIRE_CRYPTO();
+  for (const struct dv_case &c : dv_cases) {
+    DNSSECQueryResult result;
+    ServeCase(c);
+    SetCaseParams(c);
+    EXPECT_EQ(ARES_SUCCESS,
+              ares_query_dnssec(channel_, c.qname, (ares_dns_rec_type_t)c.qtype,
+                                DNSSECQueryCallback, &result));
+    Process();
+    ASSERT_TRUE(result.done) << c.desc;
+    ASSERT_NE(nullptr, result.dnsrec) << c.desc;
+    EXPECT_EQ(c.status, RecordStatus(result.dnsrec)) << c.desc;
+    if (c.status == ARES_DNSSEC_SECURE || c.status == ARES_DNSSEC_INSECURE) {
+      if (c.rcode >= 0) {
+        EXPECT_EQ(c.rcode, (int)ares_dns_record_get_rcode(result.dnsrec))
+          << c.desc;
+      }
+      // with CNAME, the links followed are CNAME records too
+      if (c.count >= 0 && c.qtype != ARES_REC_TYPE_CNAME) {
+        EXPECT_EQ((size_t)c.count, RecordCount(result.dnsrec, c.qtype))
+          << c.desc;
+      }
+    } else {
+      EXPECT_EQ(ARES_ESERVFAIL, result.status) << c.desc;
+    }
+    testing::Mock::VerifyAndClearExpectations(&server_);
+  }
+}
+
+static const struct dv_case &FindCase(const char *desc)
+{
+  for (const struct dv_case &c : dv_cases) {
+    if (strcmp(c.desc, desc) == 0) {
+      return c;
+    }
+  }
+  ADD_FAILURE() << "no test case " << desc;
+  return dv_cases[0];
+}
+
+// Validate the answer to a test case with ares_query_dnssec()
+static void QueryCase(DNSSECMockBase *t, ares_channel_t *channel,
+                      const struct dv_case &c, DNSSECQueryResult *result)
+{
+  t->ServeCase(c);
+  t->SetCaseParams(c);
+  EXPECT_EQ(ARES_SUCCESS,
+            ares_query_dnssec(channel, c.qname, (ares_dns_rec_type_t)c.qtype,
+                              DNSSECQueryCallback, result));
+  t->Process();
+  EXPECT_TRUE(result->done);
+}
+
+static std::string RRName(const ares_dns_record_t *dnsrec, size_t idx)
+{
+  const ares_dns_rr_t *rr =
+    ares_dns_record_rr_get_const(dnsrec, ARES_SECTION_ANSWER, idx);
+  return rr ? ares_dns_rr_get_name(rr) : "";
+}
+
+static ares_dns_rec_type_t RRType(const ares_dns_record_t *dnsrec, size_t idx)
+{
+  const ares_dns_rr_t *rr =
+    ares_dns_record_rr_get_const(dnsrec, ARES_SECTION_ANSWER, idx);
+  return rr ? ares_dns_rr_get_type(rr) : ARES_REC_TYPE_RAW_RR;
+}
+
+TEST_P(DNSSECMockTest, Secure)
+{
+  REQUIRE_CRYPTO();
+  DNSSECQueryResult result;
+  QueryCase(this, channel_, FindCase("BIND answer"), &result);
+  EXPECT_EQ(ARES_SUCCESS, result.status);
+  ASSERT_NE(nullptr, result.dnsrec);
+  EXPECT_TRUE(ares_dns_record_get_flags(result.dnsrec) & ARES_FLAG_AD);
+  EXPECT_TRUE(ares_dns_record_get_flags(result.dnsrec) & ARES_FLAG_QR);
+  EXPECT_EQ(ARES_RCODE_NOERROR, ares_dns_record_get_rcode(result.dnsrec));
+  ASSERT_EQ(1u, ares_dns_record_query_cnt(result.dnsrec));
+  ASSERT_EQ(1u, ares_dns_record_rr_cnt(result.dnsrec, ARES_SECTION_ANSWER));
+  EXPECT_EQ(ARES_REC_TYPE_A, RRType(result.dnsrec, 0));
+  EXPECT_EQ("www.nsec.test", RRName(result.dnsrec, 0));
+  // only validated data, no signatures, no authority or additional records
+  EXPECT_EQ(0u, ares_dns_record_rr_cnt(result.dnsrec, ARES_SECTION_AUTHORITY));
+  EXPECT_EQ(0u, ares_dns_record_rr_cnt(result.dnsrec, ARES_SECTION_ADDITIONAL));
+}
+
+TEST_P(DNSSECMockTest, SecureCNAME)
+{
+  REQUIRE_CRYPTO();
+  DNSSECQueryResult result;
+  QueryCase(this, channel_, FindCase("BIND CNAME"), &result);
+  EXPECT_EQ(ARES_SUCCESS, result.status);
+  ASSERT_NE(nullptr, result.dnsrec);
+  EXPECT_TRUE(ares_dns_record_get_flags(result.dnsrec) & ARES_FLAG_AD);
+  ASSERT_EQ(2u, ares_dns_record_rr_cnt(result.dnsrec, ARES_SECTION_ANSWER));
+  EXPECT_EQ(ARES_REC_TYPE_CNAME, RRType(result.dnsrec, 0));
+  EXPECT_EQ("alias.nsec.test", RRName(result.dnsrec, 0));
+  const ares_dns_rr_t *rr =
+    ares_dns_record_rr_get_const(result.dnsrec, ARES_SECTION_ANSWER, 0);
+  EXPECT_EQ(RRName(result.dnsrec, 1),
+            std::string(ares_dns_rr_get_str(rr, ARES_RR_CNAME_CNAME)));
+  EXPECT_EQ(ARES_REC_TYPE_A, RRType(result.dnsrec, 1));
+
+  // A real one, a chain to another zone
+  DNSSECQueryResult result2;
+  QueryCase(this, channel_, FindCase("real CNAME"), &result2);
+  EXPECT_EQ(ARES_SUCCESS, result2.status);
+  ASSERT_NE(nullptr, result2.dnsrec);
+  EXPECT_TRUE(ares_dns_record_get_flags(result2.dnsrec) & ARES_FLAG_AD);
+  EXPECT_EQ(ARES_REC_TYPE_CNAME, RRType(result2.dnsrec, 0));
+  EXPECT_EQ("www.huque.com", RRName(result2.dnsrec, 0));
+  size_t n = ares_dns_record_rr_cnt(result2.dnsrec, ARES_SECTION_ANSWER);
+  ASSERT_GE(n, 2u);
+  EXPECT_EQ(ARES_REC_TYPE_AAAA, RRType(result2.dnsrec, n - 1));
+}
+
+TEST_P(DNSSECMockTest, SecureNXDOMAIN)
+{
+  REQUIRE_CRYPTO();
+  DNSSECQueryResult result;
+  QueryCase(this, channel_, FindCase("BIND NXDOMAIN"), &result);
+  EXPECT_EQ(ARES_ENOTFOUND, result.status);
+  ASSERT_NE(nullptr, result.dnsrec);
+  EXPECT_TRUE(ares_dns_record_get_flags(result.dnsrec) & ARES_FLAG_AD);
+  EXPECT_EQ(ARES_RCODE_NXDOMAIN, ares_dns_record_get_rcode(result.dnsrec));
+  EXPECT_EQ(0u, ares_dns_record_rr_cnt(result.dnsrec, ARES_SECTION_ANSWER));
+
+  DNSSECQueryResult result2;
+  QueryCase(this, channel_, FindCase("BIND NODATA"), &result2);
+  EXPECT_EQ(ARES_ENODATA, result2.status);
+  ASSERT_NE(nullptr, result2.dnsrec);
+  EXPECT_TRUE(ares_dns_record_get_flags(result2.dnsrec) & ARES_FLAG_AD);
+  EXPECT_EQ(ARES_RCODE_NOERROR, ares_dns_record_get_rcode(result2.dnsrec));
+}
+
+TEST_P(DNSSECMockTest, Insecure)
+{
+  REQUIRE_CRYPTO();
+  DNSSECQueryResult result;
+  QueryCase(this, channel_, FindCase("BIND unsigned zone"), &result);
+  EXPECT_EQ(ARES_SUCCESS, result.status);
+  ASSERT_NE(nullptr, result.dnsrec);
+  EXPECT_FALSE(ares_dns_record_get_flags(result.dnsrec) & ARES_FLAG_AD);
+  EXPECT_EQ(ARES_RCODE_NOERROR, ares_dns_record_get_rcode(result.dnsrec));
+  ASSERT_EQ(1u, ares_dns_record_rr_cnt(result.dnsrec, ARES_SECTION_ANSWER));
+  EXPECT_EQ(ARES_REC_TYPE_A, RRType(result.dnsrec, 0));
+}
+
+TEST_P(DNSSECMockTest, Bogus)
+{
+  REQUIRE_CRYPTO();
+  DNSSECQueryResult result;
+  QueryCase(this, channel_, FindCase("BIND attack: changed address"), &result);
+  EXPECT_EQ(ARES_ESERVFAIL, result.status);
+  ASSERT_NE(nullptr, result.dnsrec);
+  EXPECT_FALSE(ares_dns_record_get_flags(result.dnsrec) & ARES_FLAG_AD);
+  EXPECT_EQ(ARES_RCODE_SERVFAIL, ares_dns_record_get_rcode(result.dnsrec));
+  EXPECT_EQ(0u, ares_dns_record_rr_cnt(result.dnsrec, ARES_SECTION_ANSWER));
+  ASSERT_EQ(1u, ares_dns_record_rr_cnt(result.dnsrec, ARES_SECTION_ADDITIONAL));
+  const ares_dns_rr_t *opt =
+    ares_dns_record_rr_get_const(result.dnsrec, ARES_SECTION_ADDITIONAL, 0);
+  const unsigned char *val = NULL;
+  size_t               len = 0;
+  ASSERT_TRUE(ares_dns_rr_get_opt_byid(
+    opt, ARES_RR_OPT_OPTIONS, ARES_OPT_PARAM_EXTENDED_DNS_ERROR, &val, &len));
+  ASSERT_GT(len, 2u);
+  // RFC 8914 4.7: DNSSEC Bogus, and the reason as text
+  EXPECT_EQ(0, val[0]);
+  EXPECT_EQ(6, val[1]);
+  std::string text((const char *)val + 2, len - 2);
+  EXPECT_EQ(0u, text.find("RRSIG for www.nsec.test. A by key ")) << text;
+  EXPECT_NE(std::string::npos, text.find(" does not verify")) << text;
+}
+
+TEST_P(DNSSECMockTest, Timeout)
+{
+  REQUIRE_CRYPTO();
+  DNSSECQueryResult result;
+  // no response to anything
+  ON_CALL(server_, OnRequest(_, _))
+    .WillByDefault(SetReplyData(&server_, std::vector<byte>()));
+  EXPECT_EQ(ARES_SUCCESS,
+            ares_query_dnssec(channel_, "www.example.com", ARES_REC_TYPE_A,
+                              DNSSECQueryCallback, &result));
+  Process();
+  EXPECT_TRUE(result.done);
+  EXPECT_EQ(ARES_ESERVFAIL, result.status);
+  EXPECT_GT(result.timeouts, 0u);
+  ASSERT_NE(nullptr, result.dnsrec);
+  EXPECT_EQ(ARES_DNSSEC_INDETERMINATE, RecordStatus(result.dnsrec));
+}
+
+TEST_P(DNSSECMockTest, Cancel)
+{
+  REQUIRE_CRYPTO();
+  DNSSECQueryResult result;
+  ServeCase(FindCase("BIND answer"));
+  SetCaseParams(FindCase("BIND answer"));
+  EXPECT_EQ(ARES_SUCCESS,
+            ares_query_dnssec(channel_, "www.nsec.test", ARES_REC_TYPE_A,
+                              DNSSECQueryCallback, &result));
+  EXPECT_FALSE(result.done);
+  ares_cancel(channel_);
+  EXPECT_TRUE(result.done);
+  EXPECT_EQ(ARES_ECANCELLED, result.status);
+  EXPECT_EQ(nullptr, result.dnsrec);
+  Process();
+}
+
+TEST_P(DNSSECMockTest, Misuse)
+{
+  DNSSECQueryResult                         result;
+  FakeCrypto                                f;
+  const struct ares_dnssec_crypto_functions fake = {
+    1, FakeAlgSupported, FakeVerify, FakeDigestSupported, FakeDigest
+  };
+  EXPECT_EQ(ARES_SUCCESS,
+            ares_set_dnssec_crypto_functions(channel_, &fake, &f));
+  EXPECT_EQ(ARES_EFORMERR,
+            ares_query_dnssec(nullptr, "www.example.com", ARES_REC_TYPE_A,
+                              DNSSECQueryCallback, &result));
+  EXPECT_EQ(ARES_EFORMERR,
+            ares_query_dnssec(channel_, "www.example.com", ARES_REC_TYPE_A,
+                              nullptr, &result));
+  EXPECT_FALSE(result.done);
+
+  const struct {
+    const char         *name;
+    ares_dns_rec_type_t type;
+  } bad[] = {
+    { nullptr,           ARES_REC_TYPE_A      },
+    { "a..b",            ARES_REC_TYPE_A      },
+    { "www.example.com", ARES_REC_TYPE_ANY    },
+    { "www.example.com", ARES_REC_TYPE_OPT    },
+    { "www.example.com", ARES_REC_TYPE_RRSIG  },
+    { "www.example.com", ARES_REC_TYPE_RAW_RR }
+  };
+
+  for (const auto &b : bad) {
+    DNSSECQueryResult r;
+    EXPECT_EQ(ARES_EFORMERR, ares_query_dnssec(channel_, b.name, b.type,
+                                               DNSSECQueryCallback, &r));
+    EXPECT_TRUE(r.done);
+    EXPECT_EQ(ARES_EFORMERR, r.status);
+    EXPECT_EQ(nullptr, r.dnsrec);
+  }
+
+  // without crypto functions
+  EXPECT_EQ(ARES_SUCCESS,
+            ares_set_dnssec_crypto_functions(channel_, nullptr, nullptr));
+  DNSSECQueryResult r;
+  EXPECT_EQ(ARES_ENOTIMP,
+            ares_query_dnssec(channel_, "www.example.com", ARES_REC_TYPE_A,
+                              DNSSECQueryCallback, &r));
+  EXPECT_TRUE(r.done);
+  EXPECT_EQ(ARES_ENOTIMP, r.status);
+  EXPECT_EQ(nullptr, r.dnsrec);
+}
+
+INSTANTIATE_TEST_SUITE_P(AddressFamilies, DNSSECMockTest,
+                         ::testing::ValuesIn(ares::test::families_modes),
+                         PrintFamilyMode);
+
+TEST_F(DefaultChannelTest, DNSSECCryptoFunctions)
+{
+  FakeCrypto                          f;
+  struct ares_dnssec_crypto_functions funcs = { 1, FakeAlgSupported, FakeVerify,
+                                                FakeDigestSupported,
+                                                FakeDigest };
+  struct ares_dnssec_crypto_functions bad;
+  ares_channel_t                     *dup = nullptr;
+  DNSSECQueryResult                   r1;
+  DNSSECQueryResult                   r2;
+  DNSSECQueryResult                   r3;
+
+  EXPECT_EQ(ARES_EFORMERR,
+            ares_set_dnssec_crypto_functions(nullptr, &funcs, &f));
+  bad         = funcs;
+  bad.version = 0;
+  EXPECT_EQ(ARES_EFORMERR,
+            ares_set_dnssec_crypto_functions(channel_, &bad, &f));
+  bad.version = 2;
+  EXPECT_EQ(ARES_EFORMERR,
+            ares_set_dnssec_crypto_functions(channel_, &bad, &f));
+  bad        = funcs;
+  bad.verify = nullptr;
+  EXPECT_EQ(ARES_EFORMERR,
+            ares_set_dnssec_crypto_functions(channel_, &bad, &f));
+  // the algorithms and digest types every validator must support
+  bad               = funcs;
+  bad.alg_supported = NoAlgSupported;
+  EXPECT_EQ(ARES_EFORMERR,
+            ares_set_dnssec_crypto_functions(channel_, &bad, &f));
+  bad                  = funcs;
+  bad.digest_supported = NoAlgSupported;
+  EXPECT_EQ(ARES_EFORMERR,
+            ares_set_dnssec_crypto_functions(channel_, &bad, &f));
+  // nothing was set
+  EXPECT_EQ(ARES_ENOTIMP, ares_query_dnssec(channel_, "a..b", ARES_REC_TYPE_A,
+                                            DNSSECQueryCallback, &r1));
+
+  // set, and copied by ares_dup(): the name is checked now
+  EXPECT_EQ(ARES_SUCCESS,
+            ares_set_dnssec_crypto_functions(channel_, &funcs, &f));
+  ASSERT_EQ(ARES_SUCCESS, ares_dup(&dup, channel_));
+  EXPECT_EQ(ARES_EFORMERR, ares_query_dnssec(dup, "a..b", ARES_REC_TYPE_A,
+                                             DNSSECQueryCallback, &r2));
+  ares_destroy(dup);
+
+  // removed
+  EXPECT_EQ(ARES_SUCCESS,
+            ares_set_dnssec_crypto_functions(channel_, nullptr, nullptr));
+  EXPECT_EQ(ARES_ENOTIMP, ares_query_dnssec(channel_, "a..b", ARES_REC_TYPE_A,
+                                            DNSSECQueryCallback, &r3));
+}
+
+// The queries of a second validation are answered from the cache
+TEST_P(DNSSECCacheMockTest, Cached)
+{
+  REQUIRE_CRYPTO();
+  const struct dv_case &c        = FindCase("BIND answer");
+  size_t                requests = 0;
+
+  SetCaseParams(c);
+  EXPECT_CALL(server_, OnRequest(_, _))
+    .WillRepeatedly([this, &c, &requests](const std::string &name, int type) {
+      std::string          fqdn = name + ".";
+      const struct dv_msg *m =
+        FindCaseMsg(c, fqdn.c_str(), (unsigned short)type);
+      requests++;
+      server_.SetReplyData(m ? Pieces(m->msg) : std::vector<byte>());
+    });
+
+  DNSSECQueryResult result1;
+  EXPECT_EQ(ARES_SUCCESS,
+            ares_query_dnssec(channel_, c.qname, (ares_dns_rec_type_t)c.qtype,
+                              DNSSECQueryCallback, &result1));
+  Process();
+  EXPECT_TRUE(result1.done);
+  ASSERT_NE(nullptr, result1.dnsrec);
+  EXPECT_EQ(ARES_DNSSEC_SECURE, RecordStatus(result1.dnsrec));
+  size_t first = requests;
+  EXPECT_GT(first, 0u);
+
+  DNSSECQueryResult result2;
+  EXPECT_EQ(ARES_SUCCESS,
+            ares_query_dnssec(channel_, c.qname, (ares_dns_rec_type_t)c.qtype,
+                              DNSSECQueryCallback, &result2));
+  Process();
+  EXPECT_TRUE(result2.done);
+  ASSERT_NE(nullptr, result2.dnsrec);
+  EXPECT_EQ(ARES_DNSSEC_SECURE, RecordStatus(result2.dnsrec));
+  EXPECT_EQ(first, requests);
+}
+
+INSTANTIATE_TEST_SUITE_P(AddressFamilies, DNSSECCacheMockTest,
+                         ::testing::ValuesIn(ares::test::families_modes),
+                         PrintFamilyMode);
+
 }  // namespace test
 }  // namespace ares
 

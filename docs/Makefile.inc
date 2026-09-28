@@ -120,6 +120,7 @@ MANPAGES = ares_cancel.3		\
   ares_process_pending_write.3		\
   ares_query.3				\
   ares_query_dnsrec.3			\
+  ares_query_dnssec.3			\
   ares_queue.3				\
   ares_queue_active_queries.3		\
   ares_queue_wait_empty.3		\
@@ -141,6 +142,7 @@ MANPAGES = ares_cancel.3		\
   ares_set_servers_ports_csv.3		\
   ares_set_socket_callback.3		\
   ares_set_socket_configure_callback.3	\
+  ares_set_dnssec_crypto_functions.3	\
   ares_set_socket_functions.3		\
   ares_set_socket_functions_ex.3	\
   ares_set_sortlist.3			\

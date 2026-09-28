@@ -870,6 +870,151 @@ CARES_EXTERN ares_status_t ares_query_dnsrec(ares_channel_t      *channel,
                                              ares_callback_dnsrec callback,
                                              void *arg, unsigned short *qid);
 
+/*! Cryptographic functions for DNSSEC validation, see
+ *  ares_set_dnssec_crypto_functions().
+ *
+ *  c-ares has no cryptography of its own.  The application provides it,
+ *  usually from the TLS library it uses.  Keys, signatures and data are in
+ *  the formats DNSSEC uses (listed below).  c-ares checks them before the
+ *  functions are called: the sizes of RSA keys and the lengths of the keys
+ *  and signatures of the other algorithms.
+ *
+ *  Algorithms, by DNSSEC algorithm number (RFC 8624):
+ *   - 5 RSASHA1, 7 RSASHA1-NSEC3-SHA1, 8 RSASHA256, 10 RSASHA512:
+ *     RSASSA-PKCS1-v1_5 with SHA-1, SHA-1, SHA-256 and SHA-512.  The key is
+ *     in the format of RFC 3110 section 2: the exponent length in one octet,
+ *     or a zero octet and the length in two octets, the exponent and the
+ *     modulus, all big-endian.  The signature is as long as the modulus.
+ *   - 13 ECDSAP256SHA256, 14 ECDSAP384SHA384: ECDSA with P-256 and SHA-256,
+ *     P-384 and SHA-384.  The key is the point as x | y (64 or 96 octets),
+ *     the signature is r | s (64 or 96 octets), RFC 6605 section 4.
+ *   - 15 ED25519, 16 ED448: PureEdDSA, with a key of 32 or 57 octets and a
+ *     signature of 64 or 114 octets, RFC 8080.
+ *
+ *  Digest types, as in DS records: 1 SHA-1, 2 SHA-256, 4 SHA-384.
+ *
+ *  Every validator must support the algorithms 8 and 13 and the digest
+ *  types 1 and 2 (RFC 8624).  Signatures made with an algorithm that is not
+ *  supported are treated like none, so a zone signed only with such
+ *  algorithms is validated as insecure (RFC 4035 section 5.2).
+ *
+ *  The functions are called with the channel lock held, from the thread that
+ *  processes the channel.  They must not call c-ares functions on the
+ *  channel.
+ */
+struct ares_dnssec_crypto_functions {
+  /*! ABI Version: must be "1" */
+  unsigned int version;
+
+  /*! REQUIRED. Whether a signature algorithm is supported.
+   *
+   *  \param[in] algorithm  DNSSEC algorithm number
+   *  \param[in] user_data  Pointer provided to
+   *                        ares_set_dnssec_crypto_functions().
+   *  \return ARES_TRUE if supported, ARES_FALSE otherwise. */
+  ares_bool_t (*alg_supported)(unsigned char algorithm, void *user_data);
+
+  /*! REQUIRED. Verify a signature made with a supported algorithm.
+   *
+   *  \param[in] algorithm  DNSSEC algorithm number
+   *  \param[in] key        Public key, as in the DNSKEY record
+   *  \param[in] key_len    Length of the key
+   *  \param[in] data       The signed data, to be hashed as the algorithm
+   *                        requires
+   *  \param[in] data_len   Length of the data
+   *  \param[in] sig        Signature, as in the RRSIG record
+   *  \param[in] sig_len    Length of the signature
+   *  \param[in] user_data  Pointer provided to
+   *                        ares_set_dnssec_crypto_functions().
+   *  \return ARES_SUCCESS if the signature is valid, ARES_ENOMEM when out of
+   *          memory, and anything else (like ARES_EBADRESP) if not. */
+  ares_status_t (*verify)(unsigned char algorithm, const unsigned char *key,
+                          size_t key_len, const unsigned char *data,
+                          size_t data_len, const unsigned char *sig,
+                          size_t sig_len, void *user_data);
+
+  /*! REQUIRED. Whether a digest type is supported.
+   *
+   *  \param[in] digest_type  Digest type
+   *  \param[in] user_data    Pointer provided to
+   *                          ares_set_dnssec_crypto_functions().
+   *  \return ARES_TRUE if supported, ARES_FALSE otherwise. */
+  ares_bool_t (*digest_supported)(unsigned char digest_type, void *user_data);
+
+  /*! REQUIRED. Hash data with a supported digest type.
+   *
+   *  \param[in]     digest_type  Digest type
+   *  \param[in]     data         Data to hash
+   *  \param[in]     data_len     Length of the data
+   *  \param[out]    out          Buffer for the digest
+   *  \param[in,out] out_len      Size of the buffer (at least 48), set to the
+   *                              length of the digest (20, 32 or 48)
+   *  \param[in]     user_data    Pointer provided to
+   *                              ares_set_dnssec_crypto_functions().
+   *  \return ARES_SUCCESS, or an error like ARES_ENOMEM. */
+  ares_status_t (*digest)(unsigned char digest_type, const unsigned char *data,
+                          size_t data_len, unsigned char *out, size_t *out_len,
+                          void *user_data);
+};
+
+/*! Set the cryptographic functions DNSSEC validation uses, which makes
+ *  ares_query_dnssec() available on the channel.  They are copied to
+ *  channels made with ares_dup().
+ *
+ *  \param[in] channel    Initialized channel
+ *  \param[in] funcs      Function table, which is copied, or NULL to remove
+ *                        the functions
+ *  \param[in] user_data  Pointer passed to the functions
+ *  \return ARES_SUCCESS, or ARES_EFORMERR on misuse: an unknown version, a
+ *          function missing, or functions that do not support the algorithms
+ *          8 and 13 and the digest types 1 and 2.
+ */
+CARES_EXTERN ares_status_t ares_set_dnssec_crypto_functions(
+  ares_channel_t *channel, const struct ares_dnssec_crypto_functions *funcs,
+  void *user_data);
+
+/*! Perform a DNS query and validate the answer with DNSSEC.
+ *
+ *  The answer is validated with DNSSEC (RFC 4033, 4034, 4035 and 5155) from
+ *  the DNS root zone trust anchors down, asking the configured servers for
+ *  the DNSKEY and DS records needed.  The servers are not trusted, they only
+ *  need to pass on DNSSEC records.  The cryptography is done with the
+ *  functions set with ares_set_dnssec_crypto_functions().
+ *
+ *  The record passed to the callback is not the response of a server, it is
+ *  built from the validated data only: the question, the CNAME and DNAME
+ *  links followed (as CNAME records) and the answer records.  Its flags and
+ *  response code tell the result:
+ *   - Secure: the ARES_FLAG_AD flag is set, the response code is
+ *     ARES_RCODE_NOERROR or ARES_RCODE_NXDOMAIN.
+ *   - Insecure, proven to come from an unsigned zone: ARES_FLAG_AD is not
+ *     set, the response code is ARES_RCODE_NOERROR or ARES_RCODE_NXDOMAIN.
+ *   - Bogus or indeterminate: the response code is ARES_RCODE_SERVFAIL, and
+ *     an Extended DNS Error (RFC 8914) option in the OPT record gives the
+ *     reason.
+ *
+ *  Name and class are like for ares_query_dnsrec(), no search domains are
+ *  applied and only class IN is supported.
+ *
+ *  \param[in]  channel  Pointer to channel on which queries will be sent.
+ *  \param[in]  name     Query name
+ *  \param[in]  type     DNS Record Type
+ *  \param[in]  callback Callback function invoked on completion or failure of
+ *                       the query sequence.  The status is as for
+ *                       ares_query_dnsrec() and the timeouts are the total of
+ *                       all queries sent.
+ *  \param[in]  arg      Additional argument passed to the callback function.
+ *  \return One of the c-ares status codes, ARES_ENOTIMP when no crypto
+ *          functions are set.  In all cases, except ARES_EFORMERR due to
+ *          misuse, this error code will also be sent to the provided
+ *          callback.
+ */
+CARES_EXTERN ares_status_t ares_query_dnssec(ares_channel_t      *channel,
+                                             const char          *name,
+                                             ares_dns_rec_type_t  type,
+                                             ares_callback_dnsrec callback,
+                                             void                *arg);
+
 CARES_EXTERN CARES_DEPRECATED_FOR(ares_search_dnsrec) void ares_search(
   ares_channel_t *channel, const char *name, int dnsclass, int type,
   ares_callback callback, void *arg);

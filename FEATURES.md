@@ -8,6 +8,7 @@
 - [TCP FastOpen (0-RTT)](#tcp-fastopen-0-rtt)
 - [Event Thread](#event-thread)
 - [System Configuration Change Monitoring](#system-configuration-change-monitoring)
+- [DNSSEC Validation](#dnssec-validation)
 
 
 ## Dynamic Server Timeout Calculation
@@ -258,3 +259,29 @@ however on other unix-like systems a polling mechanism is used that checks every
 
 This feature requires the c-ares channel to persist for the lifetime of the
 application.
+
+
+## DNSSEC Validation
+
+`ares_query_dnssec()` validates the answer to a query with DNSSEC (RFC 4033,
+4034, 4035 and 5155) from the DNS root zone trust anchors down, instead of
+trusting the configured servers to do it.  The servers only need to pass on the
+DNSSEC records: c-ares asks them for the DNSKEY and DS records it needs with the
+DO and CD bits set, and checks the chain of trust, the signatures and the
+proofs of nonexistence (NSEC and NSEC3) itself.
+
+The result is a DNS record built from the validated data only, with the AD flag
+set when the answer is secure.  A bogus answer results in SERVFAIL with an
+Extended DNS Error (RFC 8914) giving the reason.
+
+The work a validation does is limited (queries, signature verifications, NSEC3
+hash calculations), as protection against resource exhaustion attacks like
+KeyTrap (CVE-2023-50387).  Proofs of nonexistence with NSEC3 records of more
+than 150 iterations are treated as bogus (RFC 9276), and signatures made with
+SHA-1 are not accepted (RFC 9905).
+
+c-ares has no cryptography of its own and no dependencies for it: the
+application provides functions to verify signatures and calculate hashes with
+`ares_set_dnssec_crypto_functions()`, usually with the TLS library it uses.
+c-ares decides what is acceptable, like the size of RSA keys, before calling
+them.

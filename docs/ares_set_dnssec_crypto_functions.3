@@ -1,0 +1,154 @@
+.\"
+.\" Copyright (C) The c-ares project and its contributors
+.\" SPDX-License-Identifier: MIT
+.\"
+.TH ARES_SET_DNSSEC_CRYPTO_FUNCTIONS 3 "28 September 2026"
+.SH NAME
+ares_set_dnssec_crypto_functions \- Set the cryptographic functions for DNSSEC
+validation
+.SH SYNOPSIS
+.nf
+#include <ares.h>
+
+struct ares_dnssec_crypto_functions {
+  unsigned int version;
+
+  ares_bool_t (*alg_supported)(unsigned char algorithm, void *user_data);
+
+  ares_status_t (*verify)(unsigned char algorithm, const unsigned char *key,
+                          size_t key_len, const unsigned char *data,
+                          size_t data_len, const unsigned char *sig,
+                          size_t sig_len, void *user_data);
+
+  ares_bool_t (*digest_supported)(unsigned char digest_type, void *user_data);
+
+  ares_status_t (*digest)(unsigned char digest_type, const unsigned char *data,
+                          size_t data_len, unsigned char *out,
+                          size_t *out_len, void *user_data);
+};
+
+ares_status_t ares_set_dnssec_crypto_functions(
+  ares_channel_t *channel, const struct ares_dnssec_crypto_functions *funcs,
+  void *user_data);
+.fi
+
+.SH DESCRIPTION
+c-ares has no cryptography of its own.  DNSSEC validation with
+\fBares_query_dnssec(3)\fP verifies signatures and calculates hashes with
+functions the application provides, usually from the TLS library it uses.
+
+The \fBares_set_dnssec_crypto_functions(3)\fP function sets them for the
+channel
+.IR channel .
+The function table
+.I funcs
+is copied, and
+.I user_data
+is passed to each function.  When
+.I funcs
+is NULL, the functions are removed and \fBares_query_dnssec(3)\fP fails with
+.BR ARES_ENOTIMP .
+The functions are copied to channels made with \fBares_dup(3)\fP.
+
+The functions are called with the channel lock held, from the thread that
+processes the channel.  They must not call c-ares functions on the channel.
+
+All members of the table are required:
+.TP 18
+.B version
+The version of the structure, must be 1.
+.TP 18
+.B alg_supported
+Return
+.B ARES_TRUE
+if signatures with the DNSSEC algorithm number
+.I algorithm
+can be verified.
+.TP 18
+.B verify
+Verify the signature
+.I sig
+of the data
+.I data
+with the public key
+.IR key .
+The data is hashed as the algorithm requires.  Return
+.B ARES_SUCCESS
+if the signature is valid,
+.B ARES_ENOMEM
+when out of memory, and anything else (like
+.BR ARES_EBADRESP )
+if it is not.
+.TP 18
+.B digest_supported
+Return
+.B ARES_TRUE
+if the digest type
+.I digest_type
+can be calculated.
+.TP 18
+.B digest
+Hash
+.I data
+with the digest type
+.IR digest_type ,
+writing the digest to
+.IR out .
+.I out_len
+is the size of
+.I out
+(at least 48), and is set to the length of the digest.  Return
+.B ARES_SUCCESS
+or an error like
+.BR ARES_ENOMEM .
+.PP
+
+The keys and signatures are in the formats DNSSEC uses.  c-ares checks them
+before the functions are called: RSA keys of 512 to 4096 bits (1024 to 4096 for
+RSASHA512) with exponents of at most 8 octets, and the lengths of the keys and
+signatures of the other algorithms.  The algorithms, by DNSSEC algorithm number
+(RFC 8624), are:
+.TP 12
+.B 5, 7, 8, 10
+RSASHA1, RSASHA1-NSEC3-SHA1, RSASHA256 and RSASHA512: RSASSA-PKCS1-v1_5 with
+SHA-1, SHA-1, SHA-256 and SHA-512.  The key is in the format of RFC 3110 section
+2: the exponent length in one octet, or a zero octet and the length in two
+octets, followed by the exponent and the modulus, all big-endian.  The signature
+is as long as the modulus.
+.TP 12
+.B 13, 14
+ECDSAP256SHA256 and ECDSAP384SHA384: ECDSA with P-256 and SHA-256, and with
+P-384 and SHA-384.  The key is the point as x | y (64 or 96 octets), the
+signature is r | s (64 or 96 octets), as in RFC 6605 section 4.
+.TP 12
+.B 15, 16
+ED25519 and ED448: PureEdDSA (RFC 8080), with a key of 32 or 57 octets and a
+signature of 64 or 114 octets.
+.PP
+The digest types, as in DS records, are 1 (SHA-1), 2 (SHA-256) and 4
+(SHA-384).
+
+Every validator must support the algorithms 8 and 13 and the digest types 1
+and 2 (RFC 8624).  Signatures made with an algorithm that is not supported are
+treated like no signatures, so a zone signed only with such algorithms is
+validated as insecure (RFC 4035 section 5.2).  Signatures with the SHA-1 based
+algorithms 5 and 7 are never accepted (RFC 9905), whatever
+.B alg_supported
+returns.
+
+.SH RETURN VALUES
+\fBares_set_dnssec_crypto_functions(3)\fP returns
+.B ARES_SUCCESS
+when the functions were set or removed, and
+.B ARES_EFORMERR
+when
+.I channel
+is NULL, the version is not 1, a function is missing, or the functions do not
+support the algorithms 8 and 13 and the digest types 1 and 2.
+
+.SH AVAILABILITY
+\fBares_set_dnssec_crypto_functions(3)\fP was introduced in c-ares 1.35.0.
+
+.SH SEE ALSO
+.BR ares_query_dnssec (3),
+.BR ares_dup (3)

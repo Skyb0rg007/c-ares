@@ -1,0 +1,143 @@
+.\"
+.\" Copyright (C) The c-ares project and its contributors
+.\" SPDX-License-Identifier: MIT
+.\"
+.TH ARES_QUERY_DNSSEC 3 "28 September 2026"
+.SH NAME
+ares_query_dnssec \- Initiate a DNS query and validate the answer with DNSSEC
+.SH SYNOPSIS
+.nf
+#include <ares.h>
+
+typedef void (*ares_callback_dnsrec)(void *arg, ares_status_t status,
+                                     size_t timeouts,
+                                     const ares_dns_record_t *dnsrec);
+
+ares_status_t ares_query_dnssec(ares_channel_t      *channel,
+                                const char          *name,
+                                ares_dns_rec_type_t  type,
+                                ares_callback_dnsrec callback,
+                                void                *arg);
+.fi
+
+.SH DESCRIPTION
+
+The \fBares_query_dnssec(3)\fP function initiates a DNS query of class IN for
+the name
+.I name
+and the type
+.I type
+on the name service channel identified by
+.IR channel ,
+and validates the answer with DNSSEC (RFC 4033, RFC 4034, RFC 4035 and
+RFC 5155).  Like with \fBares_query_dnsrec(3)\fP, the name is used as given, no
+search domains are applied.
+
+The answer is validated from the trust anchors of the DNS root zone (the
+KSK-2017 and KSK-2024 keys published by IANA) down to the name.  The DNSKEY and
+DS records needed for this are queried from the servers of the channel with the
+DO and CD bits set.  The servers are not trusted, they only need to pass on
+DNSSEC records.  c-ares has no cryptography of its own: signatures are verified
+and hashes calculated with the functions the application sets with
+\fBares_set_dnssec_crypto_functions(3)\fP.  Signatures made with the SHA-1
+based algorithms RSASHA1 and
+RSASHA1-NSEC3-SHA1 are not accepted (RFC 9905), zones signed only with them are
+treated as unsigned.  The work a validation does is limited, as protection
+against resource exhaustion attacks.
+
+When the validation is complete or has failed, the ares library will invoke
+.IR callback ,
+the same way as for \fBares_query_dnsrec(3)\fP.  The callback argument
+.I timeouts
+is the total number of timeouts of all the queries sent.
+
+The record
+.I dnsrec
+passed to the callback is not the response of a server: it is built from the
+validated data only.  It has the question, and when the answer was validated,
+the CNAME and DNAME links followed from the question name to the final name (as
+CNAME records) and the answer records in the answer section.  It has no
+signatures, and no authority or additional section records except as described
+below.  Its flags and response code tell the result of the validation:
+.TP 12
+.B Secure
+The answer, or the nonexistence of the name or type, is proven authentic.  The
+.B ARES_FLAG_AD
+flag is set and the response code is
+.B ARES_RCODE_NOERROR
+or
+.BR ARES_RCODE_NXDOMAIN .
+.TP 12
+.B Insecure
+The answer is proven to come from a part of the DNS that is not signed.  The
+.B ARES_FLAG_AD
+flag is not set and the response code is
+.B ARES_RCODE_NOERROR
+or
+.BR ARES_RCODE_NXDOMAIN .
+.TP 12
+.B Bogus
+The answer should be signed but the validation failed, like for a missing or
+bad signature or a broken chain of trust.  The response code is
+.B ARES_RCODE_SERVFAIL
+and the additional section has an OPT record with an Extended DNS Error option
+(\fBARES_OPT_PARAM_EXTENDED_DNS_ERROR\fP, RFC 8914) with the info code 6
+(DNSSEC Bogus) and the reason as text.
+.TP 12
+.B Indeterminate
+The validation could not be completed, like when a query failed.  Like for
+bogus, but with the info code 0 (Other Error).
+.PP
+
+Applications that need a proven answer, like for DANE (RFC 6698), must check
+for the
+.B ARES_FLAG_AD
+flag.
+
+The callback argument
+.I status
+is the status for the record as for \fBares_query_dnsrec(3)\fP, like
+.B ARES_ENOTFOUND
+for NXDOMAIN and
+.B ARES_ESERVFAIL
+for a bogus or indeterminate answer.  Other errors are passed without a record:
+.TP 19
+.B ARES_EFORMERR
+The name could not be parsed, or the type cannot be validated (like ANY, OPT or
+RRSIG).
+.TP 19
+.B ARES_ENOTIMP
+No cryptographic functions are set on the channel.
+.TP 19
+.B ARES_ENOMEM
+Memory was exhausted.
+.TP 19
+.B ARES_ECANCELLED
+The query was cancelled.
+.TP 19
+.B ARES_EDESTRUCTION
+The name service channel
+.I channel
+is being destroyed; the query will not be completed.
+.PP
+
+.SH RETURN VALUES
+\fBares_query_dnssec(3)\fP returns
+.B ARES_SUCCESS
+when the query was started, and otherwise the error that is also passed to the
+callback.  When
+.I channel
+or
+.I callback
+is NULL,
+.B ARES_EFORMERR
+is returned and no callback is invoked.
+
+.SH AVAILABILITY
+\fBares_query_dnssec(3)\fP was introduced in c-ares 1.35.0.
+
+.SH SEE ALSO
+.BR ares_set_dnssec_crypto_functions (3),
+.BR ares_query_dnsrec (3),
+.BR ares_process (3),
+.BR ares_dns_record (3)

@@ -313,6 +313,19 @@ struct ares_channeldata {
    * system config changes might get triggered and we need a flag to make
    * sure we don't take action. */
   ares_bool_t                         sys_up;
+
+  /* Cryptographic functions for DNSSEC validation, see
+   * ares_set_dnssec_crypto_functions() */
+  struct ares_dnssec_crypto_functions dnssec_crypto_funcs;
+  void                               *dnssec_crypto_data;
+
+  /* Trust anchors (one per line), time and ARES_DNSSEC_* flags to use for
+   * DNSSEC validation instead of the root zone anchors, the current time and
+   * the defaults.  Only set by the test suite, see
+   * ares_dnssec_set_test_params(). */
+  char                               *dnssec_anchors;
+  time_t                              dnssec_now;
+  unsigned int                        dnssec_flags;
 };
 
 /* Does the domain end in ".onion" or ".onion."? Case-insensitive. */
