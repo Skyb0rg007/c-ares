@@ -1717,6 +1717,59 @@ fail:
   return status;
 }
 
+ares_status_t ares_dns_parse_question(const unsigned char *buf, size_t buf_len,
+                                      ares_dns_record_t **dnsrec)
+{
+  ares_buf_t    *parser = NULL;
+  ares_status_t  status;
+  unsigned short qdcount;
+  unsigned short ancount;
+  unsigned short nscount;
+  unsigned short arcount;
+
+  if (buf == NULL || buf_len == 0 || dnsrec == NULL) {
+    return ARES_EFORMERR;
+  }
+  *dnsrec = NULL;
+
+  parser = ares_buf_create_const(buf, buf_len);
+  if (parser == NULL) {
+    return ARES_ENOMEM;
+  }
+
+  status = ares_dns_parse_header(parser, 0, dnsrec, &qdcount, &ancount,
+                                 &nscount, &arcount);
+  if (status != ARES_SUCCESS) {
+    goto done;
+  }
+
+  /* Exactly one question, like ares_dns_parse_buf() requires */
+  if (qdcount != 1) {
+    status = ARES_EBADRESP;
+    goto done;
+  }
+
+  status = ares_dns_parse_qd(parser, *dnsrec);
+  if (status != ARES_SUCCESS) {
+    goto done;
+  }
+
+  /* No records are kept, and no OPT RR, so take the rcode as it is */
+  if (!ares_dns_rcode_isvalid((*dnsrec)->raw_rcode)) {
+    (*dnsrec)->rcode = ARES_RCODE_SERVFAIL;
+  } else {
+    (*dnsrec)->rcode = (ares_dns_rcode_t)(*dnsrec)->raw_rcode;
+  }
+
+done:
+  if (status != ARES_SUCCESS) {
+    ares_dns_record_destroy(*dnsrec);
+    *dnsrec = NULL;
+  }
+  ares_buf_destroy(parser);
+  return status;
+}
+
 ares_status_t ares_dns_parse(const unsigned char *buf, size_t buf_len,
                              unsigned int flags, ares_dns_record_t **dnsrec)
 {

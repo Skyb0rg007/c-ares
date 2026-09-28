@@ -902,7 +902,8 @@ static ares_status_t process_answer(ares_channel_t      *channel,
   ares_server_t     *server  = conn->server;
   ares_dns_record_t *rdnsrec = NULL;
   ares_status_t      status;
-  ares_bool_t        is_cached = ARES_FALSE;
+  ares_bool_t        is_cached    = ARES_FALSE;
+  ares_bool_t        is_truncated = ARES_FALSE;
 
   /* UDP can have 0-byte messages, drop them to the ground */
   if (alen == 0) {
@@ -912,9 +913,19 @@ static ares_status_t process_answer(ares_channel_t      *channel,
   /* Parse the response */
   status = ares_dns_parse(abuf, alen, 0, &rdnsrec);
   if (status != ARES_SUCCESS) {
-    /* Malformations are never accepted */
-    status = ARES_EBADRESP;
-    goto cleanup;
+    /* A truncated UDP response can end in the middle of a record: RFC 2181
+     * section 9 allows servers to leave a partial RRset in it, and some,
+     * like the systemd-resolved stub, cut the message at the size limit.
+     * Its header and question are still enough to retry the query over
+     * TCP.  Other malformations are never accepted. */
+    if ((conn->flags & ARES_CONN_FLAG_TCP) ||
+        (channel->flags & ARES_FLAG_IGNTC) ||
+        ares_dns_parse_question(abuf, alen, &rdnsrec) != ARES_SUCCESS ||
+        !(ares_dns_record_get_flags(rdnsrec) & ARES_FLAG_TC)) {
+      status = ARES_EBADRESP;
+      goto cleanup;
+    }
+    is_truncated = ARES_TRUE;
   }
 
   /* Find the query corresponding to this packet. The queries are
@@ -937,9 +948,11 @@ static ares_status_t process_answer(ares_channel_t      *channel,
   }
 
   /* Validate DNS cookie in response. This function may need to requeue the
-   * query. */
-  if (ares_cookie_validate(query, rdnsrec, conn, now, requeue) !=
-      ARES_SUCCESS) {
+   * query.  A truncated response that could not be parsed has lost its OPT
+   * RR with the cookie.  All it can do is move the query to TCP, which is
+   * safe even when the response is spoofed. */
+  if (!is_truncated && ares_cookie_validate(query, rdnsrec, conn, now,
+                                            requeue) != ARES_SUCCESS) {
     /* Drop response and return */
     status = ARES_SUCCESS;
     goto cleanup;
@@ -955,7 +968,7 @@ static ares_status_t process_answer(ares_channel_t      *channel,
   /* There are old servers that don't understand EDNS at all, then some servers
    * that have non-compliant implementations.  Lets try to detect this sort
    * of thing. */
-  if (issue_might_be_edns(query->query, rdnsrec)) {
+  if (!is_truncated && issue_might_be_edns(query->query, rdnsrec)) {
     status = rewrite_without_edns(query);
     if (status != ARES_SUCCESS) {
       end_query(channel, server, query, status, NULL, requeue);

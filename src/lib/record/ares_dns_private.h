@@ -57,6 +57,18 @@ void ares_dns_record_ttl_decrement(ares_dns_record_t *dnsrec,
                                    unsigned int       ttl_decrement);
 
 /* Same as ares_dns_write() but appends to an existing buffer object */
+/*! Parse only the header and question section of a DNS message, like a
+ *  truncated response that cannot be parsed as a whole.
+ *
+ *  \param[in]  buf     pointer to the message
+ *  \param[in]  buf_len length of the message
+ *  \param[out] dnsrec  the record with the header and question, to be
+ *                      destroyed with ares_dns_record_destroy()
+ *  \return ARES_SUCCESS on success
+ */
+ares_status_t ares_dns_parse_question(const unsigned char *buf, size_t buf_len,
+                                      ares_dns_record_t **dnsrec);
+
 ares_status_t ares_dns_write_buf(const ares_dns_record_t *dnsrec,
                                  ares_buf_t              *buf);
 

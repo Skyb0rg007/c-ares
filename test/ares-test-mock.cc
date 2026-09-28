@@ -228,6 +228,60 @@ TEST_P(MockUDPChannelTest, TruncationRetry) {
   EXPECT_EQ("{'www.google.com' aliases=[] addrs=[1.2.3.4]}", ss.str());
 }
 
+static int TcpSocketCallback(ares_socket_t fd, int type, void *data) {
+  (void)fd;
+  if (type == SOCK_STREAM) {
+    *(bool *)data = true;
+  }
+  return ARES_SUCCESS;
+}
+
+// A truncated response that ends in the middle of a record cannot be parsed,
+// it must still make the query move to TCP
+TEST_P(NoDNS0x20MockTest, TruncationRetryPartialRecord) {
+  DNSPacket rspfull;
+  rspfull.set_response().set_aa()
+    .add_question(new DNSQuestion("www.google.com", T_A))
+    .add_answer(new DNSARR("www.google.com", 100, {1, 2, 3, 4}));
+  std::vector<byte> truncated = rspfull.data();
+  truncated[2] |= 0x02;                    // TC
+  truncated.resize(truncated.size() - 2);  // cut into the address
+  DNSPacket rspok;
+  rspok.set_response()
+    .add_question(new DNSQuestion("www.google.com", T_A))
+    .add_answer(new DNSARR("www.google.com", 100, {1, 2, 3, 4}));
+  EXPECT_CALL(server_, OnRequest("www.google.com", T_A))
+    .WillOnce(SetReplyData(&server_, truncated))
+    .WillOnce(SetReply(&server_, &rspok));
+  bool tcp = false;
+  ares_set_socket_callback(channel_, TcpSocketCallback, &tcp);
+  HostResult result;
+  ares_gethostbyname(channel_, "www.google.com.", AF_INET, HostCallback, &result);
+  Process();
+  EXPECT_TRUE(result.done_);
+  EXPECT_TRUE(tcp);
+  std::stringstream ss;
+  ss << result.host_;
+  EXPECT_EQ("{'www.google.com' aliases=[] addrs=[1.2.3.4]}", ss.str());
+}
+
+// Without the TC flag, a response cut in the middle of a record is malformed
+TEST_P(NoDNS0x20MockTest, PartialRecordNoTruncation) {
+  DNSPacket rspfull;
+  rspfull.set_response().set_aa()
+    .add_question(new DNSQuestion("www.google.com", T_A))
+    .add_answer(new DNSARR("www.google.com", 100, {1, 2, 3, 4}));
+  std::vector<byte> cut = rspfull.data();
+  cut.resize(cut.size() - 2);
+  ON_CALL(server_, OnRequest("www.google.com", T_A))
+    .WillByDefault(SetReplyData(&server_, cut));
+  HostResult result;
+  ares_gethostbyname(channel_, "www.google.com.", AF_INET, HostCallback, &result);
+  Process();
+  EXPECT_TRUE(result.done_);
+  EXPECT_EQ((int)ARES_EBADRESP, result.status_);
+}
+
 TEST_P(MockUDPChannelTest, UTF8BadName) {
   DNSPacket reply;
   reply.set_response().set_aa()
