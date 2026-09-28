@@ -151,6 +151,19 @@ static const ares_nameoffset_t *ares_nameoffset_find(ares_llist_t *list,
       continue;
     }
 
+    /* The "." must not be escaped, e.g. "x\.example.com" is a single label
+     * "x.example" followed by "com".  It is escaped if it follows an odd
+     * number of backslashes, as "\\" is an escaped backslash. */
+    if (prefix_len != 0) {
+      size_t num_bs = 0;
+      while (num_bs < prefix_len - 1 && name[prefix_len - 2 - num_bs] == '\\') {
+        num_bs++;
+      }
+      if (num_bs % 2 != 0) {
+        continue;
+      }
+    }
+
     longest_match = val;
   }
 

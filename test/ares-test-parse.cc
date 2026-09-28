@@ -455,5 +455,60 @@ TEST_F(LibraryTest, ParseSvcbRejectsCompressedTarget) {
   EXPECT_EQ(nullptr, dnsrec);
 }
 
+// Name compression must only match a suffix at a label boundary: in
+// "dns\.admin.example.com" the escaped dot is part of the first label, so
+// the name must not be compressed as "dns\" + "admin.example.com".
+TEST_F(LibraryTest, WriteNameWithEscapedDot) {
+  const char *names[] = { "dns\\.admin.example.com", "x\\.example.com",
+                          "a\\\\.example.com", "a\\\\\\.example.com" };
+  ares_dns_record_t *dnsrec = NULL;
+  ares_dns_rr_t     *rr     = NULL;
+  size_t             i;
+
+  ASSERT_EQ(ARES_SUCCESS,
+            ares_dns_record_create(&dnsrec, 0x1234, ARES_FLAG_QR,
+                                   ARES_OPCODE_QUERY, ARES_RCODE_NOERROR));
+  EXPECT_EQ(ARES_SUCCESS, ares_dns_record_query_add(dnsrec, "example.com",
+                                                    ARES_REC_TYPE_ANY,
+                                                    ARES_CLASS_IN));
+  EXPECT_EQ(ARES_SUCCESS,
+            ares_dns_record_rr_add(&rr, dnsrec, ARES_SECTION_ANSWER,
+                                   "example.com", ARES_REC_TYPE_SOA,
+                                   ARES_CLASS_IN, 300));
+  EXPECT_EQ(ARES_SUCCESS,
+            ares_dns_rr_set_str(rr, ARES_RR_SOA_MNAME, "ns.example.com"));
+  EXPECT_EQ(ARES_SUCCESS, ares_dns_rr_set_str(rr, ARES_RR_SOA_RNAME, names[0]));
+  for (i = 1; i < sizeof(names) / sizeof(*names); i++) {
+    EXPECT_EQ(ARES_SUCCESS,
+              ares_dns_record_rr_add(&rr, dnsrec, ARES_SECTION_ANSWER,
+                                     "example.com", ARES_REC_TYPE_MX,
+                                     ARES_CLASS_IN, 300));
+    EXPECT_EQ(ARES_SUCCESS, ares_dns_rr_set_u16(rr, ARES_RR_MX_PREFERENCE, 10));
+    EXPECT_EQ(ARES_SUCCESS,
+              ares_dns_rr_set_str(rr, ARES_RR_MX_EXCHANGE, names[i]));
+  }
+
+  unsigned char *out     = NULL;
+  size_t         out_len = 0;
+  EXPECT_EQ(ARES_SUCCESS, ares_dns_write(dnsrec, &out, &out_len));
+  ares_dns_record_destroy(dnsrec);
+  dnsrec = NULL;
+
+  EXPECT_EQ(ARES_SUCCESS, ares_dns_parse(out, out_len, 0, &dnsrec));
+  ares_free_string(out);
+  ASSERT_NE(nullptr, dnsrec);
+  ASSERT_EQ(4, ares_dns_record_rr_cnt(dnsrec, ARES_SECTION_ANSWER));
+  const ares_dns_rr_t *crr =
+    ares_dns_record_rr_get_const(dnsrec, ARES_SECTION_ANSWER, 0);
+  EXPECT_EQ(std::string(names[0]),
+            std::string(ares_dns_rr_get_str(crr, ARES_RR_SOA_RNAME)));
+  for (i = 1; i < sizeof(names) / sizeof(*names); i++) {
+    crr = ares_dns_record_rr_get_const(dnsrec, ARES_SECTION_ANSWER, i);
+    EXPECT_EQ(std::string(names[i]),
+              std::string(ares_dns_rr_get_str(crr, ARES_RR_MX_EXCHANGE)));
+  }
+  ares_dns_record_destroy(dnsrec);
+}
+
 }  // namespace test
 }  // namespace ares
