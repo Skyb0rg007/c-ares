@@ -40,16 +40,18 @@ typedef struct {
 
 static char *ares_qcache_calc_key(const ares_dns_record_t *dnsrec)
 {
-  ares_buf_t      *buf = ares_buf_create();
-  size_t           i;
-  ares_status_t    status;
-  ares_dns_flags_t flags;
+  ares_buf_t          *buf = ares_buf_create();
+  size_t               i;
+  ares_status_t        status;
+  ares_dns_flags_t     flags;
+  const ares_dns_rr_t *opt;
 
   if (dnsrec == NULL || buf == NULL) {
     return NULL; /* LCOV_EXCL_LINE: DefensiveCoding */
   }
 
-  /* Format is OPCODE|FLAGS[|QTYPE1|QCLASS1|QNAME1]... */
+  /* Format is OPCODE|FLAGS[|QTYPE1|QCLASS1|QNAME1]..., FLAGS being the
+   * RD, CD and DO bits */
 
   status = ares_buf_append_str(
     buf, ares_dns_opcode_tostr(ares_dns_record_get_opcode(dnsrec)));
@@ -72,6 +74,17 @@ static char *ares_qcache_calc_key(const ares_dns_record_t *dnsrec)
   }
   if (flags & ARES_FLAG_CD) {
     status = ares_buf_append_str(buf, "cd");
+    if (status != ARES_SUCCESS) {
+      goto fail; /* LCOV_EXCL_LINE: OutOfMemory */
+    }
+  }
+
+  /* The EDNS DO bit (RFC 3225) changes the answer: DNSSEC records are only
+   * included when it is set.  A response to a query without it must not
+   * answer one with it. */
+  opt = ares_dns_get_opt_rr_const(dnsrec);
+  if (opt != NULL && (ares_dns_rr_get_u16(opt, ARES_RR_OPT_FLAGS) & 0x8000)) {
+    status = ares_buf_append_str(buf, "do");
     if (status != ARES_SUCCESS) {
       goto fail; /* LCOV_EXCL_LINE: OutOfMemory */
     }

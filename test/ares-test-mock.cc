@@ -1119,6 +1119,45 @@ TEST_P(CacheQueriesTest, UnnamedTypes) {
   EXPECT_EQ(59, (int)qtype);
 }
 
+// A response to a query without the EDNS DO bit has no DNSSEC records, and
+// must not be returned for a query with it
+TEST_P(CacheQueriesTest, DnssecOkBit) {
+  DNSPacket rsp;
+  rsp.set_response().set_aa()
+    .add_question(new DNSQuestion("www.google.com", T_A))
+    .add_answer(new DNSARR("www.google.com", 100, {2, 3, 4, 5}));
+  EXPECT_CALL(server_, OnRequest("www.google.com", T_A))
+    .Times(2)
+    .WillRepeatedly(SetReply(&server_, &rsp));
+
+  QueryResult result;
+  ares_query_dnsrec(channel_, "www.google.com", ARES_CLASS_IN, ARES_REC_TYPE_A,
+                    QueryCallback, &result, NULL);
+  Process();
+  EXPECT_TRUE(result.done_);
+
+  ares_dns_record_t *query = NULL;
+  ares_dns_rr_t     *opt   = NULL;
+  EXPECT_EQ(ARES_SUCCESS,
+            ares_dns_record_create(&query, 0, ARES_FLAG_RD, ARES_OPCODE_QUERY,
+                                   ARES_RCODE_NOERROR));
+  EXPECT_EQ(ARES_SUCCESS, ares_dns_record_query_add(query, "www.google.com",
+                                                    ARES_REC_TYPE_A,
+                                                    ARES_CLASS_IN));
+  EXPECT_EQ(ARES_SUCCESS,
+            ares_dns_record_rr_add(&opt, query, ARES_SECTION_ADDITIONAL, "",
+                                   ARES_REC_TYPE_OPT, ARES_CLASS_IN, 0));
+  EXPECT_EQ(ARES_SUCCESS, ares_dns_rr_set_u16(opt, ARES_RR_OPT_UDP_SIZE, 1232));
+  EXPECT_EQ(ARES_SUCCESS, ares_dns_rr_set_u8(opt, ARES_RR_OPT_VERSION, 0));
+  EXPECT_EQ(ARES_SUCCESS, ares_dns_rr_set_u16(opt, ARES_RR_OPT_FLAGS, 0x8000));
+
+  QueryResult result_do;
+  ares_send_dnsrec(channel_, query, QueryCallback, &result_do, NULL);
+  ares_dns_record_destroy(query);
+  Process();
+  EXPECT_TRUE(result_do.done_);
+}
+
 TEST_P(CacheQueriesTest, BlankName) {
   DNSPacket rsp;
   rsp.set_response().set_aa()
