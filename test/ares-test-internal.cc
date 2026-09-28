@@ -3419,5 +3419,71 @@ const struct ares_socket_functions VirtualizeIO::default_functions = {
 };
 
 
+#ifndef CARES_SYMBOL_HIDING
+struct QidReuse {
+  ares_channel_t *channel;
+  unsigned short  qid;
+  unsigned short  qid2;
+  QueryResult     result2;
+};
+
+static void QidReuseCallback(void *arg, ares_status_t status, size_t timeouts,
+                             const ares_dns_record_t *dnsrec)
+{
+  QidReuse  *r = (QidReuse *)arg;
+  static int taken;
+  size_t     id;
+
+  EXPECT_EQ(ARES_SUCCESS, status);
+  (void)timeouts;
+  (void)dnsrec;
+
+  /* Take every other query id, so the query sent here gets the id of the
+   * query that just finished */
+  for (id = 0; id <= 0xffff; id++) {
+    if (id != r->qid) {
+      EXPECT_TRUE(ares_htable_szvp_insert(r->channel->queries_by_qid, id,
+                                          &taken));
+    }
+  }
+  EXPECT_EQ(ARES_SUCCESS,
+            ares_query_dnsrec(r->channel, "www.example.com", ARES_CLASS_IN,
+                              ARES_REC_TYPE_A, QueryCallback, &r->result2,
+                              &r->qid2));
+  for (id = 0; id <= 0xffff; id++) {
+    if (id != r->qid) {
+      ares_htable_szvp_remove(r->channel->queries_by_qid, id);
+    }
+  }
+}
+
+/* A query sent from the callback of another query can get the query id the
+ * finished query had.  Freeing the finished query after its callback must
+ * not forget the new query, or its answer is ignored and it never ends. */
+TEST_P(MockUDPChannelTest, QueryIdReusedInCallback)
+{
+  DNSPacket rsp;
+  rsp.set_response()
+    .set_aa()
+    .add_question(new DNSQuestion("www.example.com", T_A))
+    .add_answer(new DNSARR("www.example.com", 100, { 1, 2, 3, 4 }));
+  ON_CALL(server_, OnRequest("www.example.com", T_A))
+    .WillByDefault(SetReply(&server_, &rsp));
+
+  QidReuse r;
+  r.channel = channel_;
+  r.qid     = 0;
+  r.qid2    = 0;
+  EXPECT_EQ(ARES_SUCCESS,
+            ares_query_dnsrec(channel_, "www.example.com", ARES_CLASS_IN,
+                              ARES_REC_TYPE_A, QidReuseCallback, &r, &r.qid));
+  Process();
+  EXPECT_EQ(r.qid, r.qid2);
+  EXPECT_TRUE(r.result2.done_);
+  EXPECT_EQ(ARES_SUCCESS, r.result2.status_);
+  EXPECT_EQ(0u, ares_queue_active_queries(channel_));
+}
+#endif
+
 }  // namespace test
 }  // namespace ares

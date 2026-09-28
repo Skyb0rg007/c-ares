@@ -1609,9 +1609,17 @@ done:
 
 static void ares_detach_query(ares_query_t *query)
 {
-  /* Remove the query from all the lists in which it is linked */
+  ares_channel_t *channel = query->channel;
+
+  /* Remove the query from all the lists in which it is linked.  A query is
+   * detached before its callback is called and again when it is freed.  In
+   * between, the callback may have sent a new query that got the same query
+   * id, so only remove the id if it still belongs to this query. */
   ares_query_remove_from_conn(query);
-  ares_htable_szvp_remove(query->channel->queries_by_qid, query->qid);
+  if (ares_htable_szvp_get_direct(channel->queries_by_qid, query->qid) ==
+      query) {
+    ares_htable_szvp_remove(channel->queries_by_qid, query->qid);
+  }
   ares_llist_node_destroy(query->node_all_queries);
   query->node_all_queries = NULL;
 }
