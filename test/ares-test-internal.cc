@@ -3056,6 +3056,56 @@ TEST_F(LibraryTest, ZeroLengthRawRrKeepsType) {
   ares_dns_record_destroy(parsed);
 }
 
+/* An unknown type record with no RDATA (RFC 3597) can be written back */
+TEST_F(LibraryTest, ZeroLengthRawRrWrite) {
+  ares_dns_record_t   *parsed  = NULL;
+  ares_dns_record_t   *dup     = NULL;
+  const ares_dns_rr_t *rr      = NULL;
+  unsigned char       *out     = NULL;
+  size_t               out_len = 0;
+  size_t               data_len;
+
+  const unsigned char pkt[] = {
+    0x12, 0x34,  /* ID */
+    0x81, 0x80,  /* Flags: QR=1, RD=1, RA=1 */
+    0x00, 0x01,  /* QDCOUNT=1 */
+    0x00, 0x01,  /* ANCOUNT=1 */
+    0x00, 0x00,  /* NSCOUNT=0 */
+    0x00, 0x00,  /* ARCOUNT=0 */
+    /* Question: example.com, type 65432, class IN */
+    0x07, 'e','x','a','m','p','l','e',
+    0x03, 'c','o','m',
+    0x00,
+    0xff, 0x98,  /* QTYPE=65432 */
+    0x00, 0x01,  /* QCLASS=IN */
+    /* Answer RR: example.com (compressed), type 65432, class IN, TTL 300 */
+    0xc0, 0x0c,  /* Name pointer */
+    0xff, 0x98,  /* TYPE=65432 */
+    0x00, 0x01,  /* CLASS=IN */
+    0x00, 0x00, 0x01, 0x2c,  /* TTL=300 */
+    0x00, 0x00   /* RDLENGTH=0 */
+  };
+
+  ASSERT_EQ(ARES_SUCCESS, ares_dns_parse(pkt, sizeof(pkt), 0, &parsed));
+  EXPECT_EQ(ARES_SUCCESS, ares_dns_write(parsed, &out, &out_len));
+  if (out != NULL) {
+    EXPECT_EQ(std::vector<unsigned char>(pkt, pkt + sizeof(pkt)),
+              std::vector<unsigned char>(out, out + out_len));
+  }
+  ares_free_string(out);
+
+  dup = ares_dns_record_duplicate(parsed);
+  ares_dns_record_destroy(parsed);
+  ASSERT_NE(nullptr, dup);
+  rr = ares_dns_record_rr_get_const(dup, ARES_SECTION_ANSWER, 0);
+  EXPECT_EQ(ARES_REC_TYPE_RAW_RR, ares_dns_rr_get_type(rr));
+  EXPECT_EQ(65432, ares_dns_rr_get_u16(rr, ARES_RR_RAW_RR_TYPE));
+  data_len = 1;
+  ares_dns_rr_get_bin(rr, ARES_RR_RAW_RR_DATA, &data_len);
+  EXPECT_EQ(0, data_len);
+  ares_dns_record_destroy(dup);
+}
+
 TEST_F(LibraryTest, RawRrTypeTostrFromstrRoundtrip) {
   const char         *str;
   ares_dns_rec_type_t qtype = (ares_dns_rec_type_t)0;
