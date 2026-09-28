@@ -3483,6 +3483,109 @@ TEST_P(MockUDPChannelTest, QueryIdReusedInCallback)
   EXPECT_EQ(ARES_SUCCESS, r.result2.status_);
   EXPECT_EQ(0u, ares_queue_active_queries(channel_));
 }
+
+struct QidReuseCancel {
+  ares_channel_t *channel;
+  unsigned short  qid[2];
+  int             calls;
+  ares_status_t   status2;
+  unsigned short  qid3;
+  QueryResult     result3;
+};
+
+static void QidReuseCancelCallback(void *arg, ares_status_t status,
+                                   size_t                   timeouts,
+                                   const ares_dns_record_t *dnsrec)
+{
+  QidReuseCancel *r = (QidReuseCancel *)arg;
+  static int      taken;
+  unsigned short  other;
+  size_t          id;
+
+  (void)timeouts;
+  if (++r->calls > 1) {
+    r->status2 = status;
+    return;
+  }
+  EXPECT_EQ(ARES_SUCCESS, status);
+  ASSERT_NE(nullptr, dnsrec);
+  other = (ares_dns_record_get_id(dnsrec) == r->qid[0]) ? r->qid[1]
+                                                          : r->qid[0];
+
+  /* End the other query, then send a query that gets its query id */
+  ares_cancel(r->channel);
+  for (id = 0; id <= 0xffff; id++) {
+    if (id != other) {
+      EXPECT_TRUE(ares_htable_szvp_insert(r->channel->queries_by_qid, id,
+                                          &taken));
+    }
+  }
+  EXPECT_EQ(ARES_SUCCESS,
+            ares_query_dnsrec(r->channel, "www.c.com", ARES_CLASS_IN,
+                              ARES_REC_TYPE_A, QueryCallback, &r->result3,
+                              &r->qid3));
+  for (id = 0; id <= 0xffff; id++) {
+    if (id != other) {
+      ares_htable_szvp_remove(r->channel->queries_by_qid, id);
+    }
+  }
+  EXPECT_EQ(other, r->qid3);
+}
+
+/* Two answers read at once, so both queries end in the same pass.  The
+ * callback of the first ends the second query and sends a new one with the
+ * query id of the second.  The new query must not be taken for the second
+ * one and get its answer. */
+TEST_P(MockTCPChannelTest, QueryIdReusedAfterCancelInCallback)
+{
+  DNSPacket rsp_a;
+  rsp_a.set_response()
+    .set_aa()
+    .add_question(new DNSQuestion("www.a.com", T_A))
+    .add_answer(new DNSARR("www.a.com", 100, { 1, 1, 1, 1 }));
+  ON_CALL(server_, OnRequest("www.a.com", T_A))
+    .WillByDefault(SetReply(&server_, &rsp_a));
+  DNSPacket rsp_b;
+  rsp_b.set_response()
+    .set_aa()
+    .add_question(new DNSQuestion("www.b.com", T_A))
+    .add_answer(new DNSARR("www.b.com", 100, { 2, 2, 2, 2 }));
+  ON_CALL(server_, OnRequest("www.b.com", T_A))
+    .WillByDefault(SetReply(&server_, &rsp_b));
+  DNSPacket rsp_c;
+  rsp_c.set_response()
+    .set_aa()
+    .add_question(new DNSQuestion("www.c.com", T_A))
+    .add_answer(new DNSARR("www.c.com", 100, { 3, 3, 3, 3 }));
+  ON_CALL(server_, OnRequest("www.c.com", T_A))
+    .WillByDefault(SetReply(&server_, &rsp_c));
+
+  QidReuseCancel r;
+  r.channel = channel_;
+  r.calls   = 0;
+  r.status2 = ARES_SUCCESS;
+  r.qid3    = 0;
+  EXPECT_EQ(ARES_SUCCESS,
+            ares_query_dnsrec(channel_, "www.a.com", ARES_CLASS_IN,
+                              ARES_REC_TYPE_A, QidReuseCancelCallback, &r,
+                              &r.qid[0]));
+  EXPECT_EQ(ARES_SUCCESS,
+            ares_query_dnsrec(channel_, "www.b.com", ARES_CLASS_IN,
+                              ARES_REC_TYPE_A, QidReuseCancelCallback, &r,
+                              &r.qid[1]));
+  Process();
+  EXPECT_EQ(2, r.calls);
+  EXPECT_EQ(ARES_ECANCELLED, r.status2);
+  EXPECT_TRUE(r.result3.done_);
+  EXPECT_EQ(ARES_SUCCESS, r.result3.status_);
+  ASSERT_NE(nullptr, r.result3.dnsrec_.dnsrec_);
+  const char         *name = NULL;
+  ares_dns_rec_type_t qtype;
+  ares_dns_class_t    qclass;
+  EXPECT_EQ(ARES_SUCCESS, ares_dns_record_query_get(r.result3.dnsrec_.dnsrec_,
+                                                    0, &name, &qtype, &qclass));
+  EXPECT_STRCASEEQ("www.c.com", name);
+}
 #endif
 
 }  // namespace test

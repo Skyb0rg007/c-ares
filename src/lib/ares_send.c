@@ -145,6 +145,7 @@ ares_status_t ares_send_nolock(ares_channel_t *channel, ares_server_t *server,
 
   query->channel      = channel;
   query->qid          = id;
+  query->seq          = channel->next_query_seq++;
   query->timeout.sec  = 0;
   query->timeout.usec = 0;
   query->using_tcp =

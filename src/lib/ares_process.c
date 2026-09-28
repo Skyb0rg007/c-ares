@@ -552,6 +552,7 @@ typedef enum {
 typedef struct {
   requeue_type_t     type;   /* type of entry, requeue or endquery */
   unsigned short     qid;    /* query id */
+  size_t             seq;    /* query sequence number */
   ares_server_t     *server; /* requeue only: optional */
   ares_status_t      status; /* endquery only */
   ares_dns_record_t *dnsrec; /* endquery only: optional */
@@ -575,6 +576,7 @@ static ares_status_t
 
   entry.type   = type;
   entry.qid    = query->qid;
+  entry.seq    = query->seq;
   entry.server = server;
   entry.status = status;
   entry.dnsrec = dnsrec;
@@ -631,7 +633,12 @@ static ares_status_t ares_flush_requeue(ares_channel_t       *channel,
       break; /* LCOV_EXCL_LINE: DefensiveCoding */
     }
 
+    /* The query may have ended already, and a callback may have sent a new
+     * query that got the same query id since then */
     query = ares_htable_szvp_get_direct(channel->queries_by_qid, entry.qid);
+    if (query != NULL && query->seq != entry.seq) {
+      query = NULL;
+    }
 
     if (entry.type == REQUEUE_REQUEUE) {
       /* Query disappeared (e.g. a prior callback in this drain cancelled it) */

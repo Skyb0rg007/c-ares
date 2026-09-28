@@ -146,6 +146,10 @@ typedef struct ares_query ares_query_t;
 struct ares_query {
   /* Query ID from qbuf, for faster lookup, and current timeout */
   unsigned short       qid; /* host byte order */
+  /* Sequence number of the query on the channel.  Unlike the query id it is
+   * not reused once the query ends, so it tells apart two queries that had
+   * the same query id one after the other. */
+  size_t               seq;
   ares_timeval_t       ts;  /*!< Timestamp query was sent */
   ares_timeval_t       timeout;
   ares_channel_t      *channel;
@@ -235,6 +239,8 @@ struct ares_channeldata {
   ares_llist_t        *all_queries;
   /* Queries bucketed by qid, for quickly dispatching DNS responses: */
   ares_htable_szvp_t  *queries_by_qid;
+  /* Sequence number for the next query */
+  size_t               next_query_seq;
 
   /* Queries bucketed by timeout, for quickly handling timeouts: */
   ares_slist_t        *queries_by_timeout;
